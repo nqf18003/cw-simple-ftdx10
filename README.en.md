@@ -11,11 +11,17 @@ The screen can be switched between English and Japanese.
 ![Screen (English)](screenshot_en.png)
 
 ## Features
+- **Power ON / OFF**: the button at the top left turns the radio on or off. After turning it on, the program connects automatically.
+  You are asked to confirm before it turns the radio off.
+  The button is green while the radio is on and gray while it is off.
+  If the radio is on when you close the program, it asks "Turn the radio off too?"
 - **Shift only the TX frequency (TX CLAR)**: a slider shifts the TX frequency by ±100 Hz (±1000 Hz with "×10").
   TX CLAR is turned on automatically when you connect. This helps you avoid calling exactly on the other station's frequency.
   If you turn the CLAR knob on the radio, the screen follows it.
 - **RX frequency knob**: turn the big knob to change the RX frequency (VFO-A). The step can be 1 Hz / 10 Hz / 100 Hz / 1 kHz.
   Pressing a step button rounds the current frequency to that step.
+  After the frequency is changed elsewhere (e.g. with the radio's dial), the step that matches its lowest non-zero digit
+  is chosen automatically the next time you turn the knob (e.g. 7.001.100 → 100 Hz).
 - **Keyer ON/OFF and Break-in ON/OFF**: one button each.
 - **CW speed** (4–60 WPM) and **RF power** (5–100 W, with 5/10/20/50/100 W buttons): sliders.
 - **Filter**: roofing filter (12 kHz / 3 kHz / 500 Hz / 300 Hz) and width. The width slider range follows the roofing filter.
@@ -40,6 +46,10 @@ Settings that are buried in the radio's menus (keyer, CW speed, break-in, RF pow
 4. Set "Speed (bps)" to the same value as the radio's "CAT RATE" menu (usually 38400).
    If it is different, the program tries 4800 / 9600 / 19200 / 38400 when connecting.
 5. Press "Connect". When connected, TX is shifted by the slider amount (TX CLAR ON).
+   - If the radio is off, press "**Power ON**" at the top left. The radio turns on, and the program connects when it has started
+     (leave the USB cable connected. The speed must match the radio's CAT RATE; once you have connected with "Connect",
+     the right speed is remembered).
+   - "**Power OFF**" turns the radio off after a confirmation. "Disconnect" alone does not turn it off.
 6. Use the button at the top right ("日本語" / "English") to switch the language.
 
 ## Relay for logging software (optional)

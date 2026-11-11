@@ -28,7 +28,7 @@ try:
 except ImportError:  # selftest だけなら無くても動くようにする
     serial = None
 
-VERSION = "2.1.1"
+VERSION = "2.2.0"
 BAUDS = [38400, 19200, 9600, 4800]
 MAX_OFFSET = 9990  # FTDX10 のクラリファイアは ±9.99 kHz
 POLL_MS = 1000
@@ -46,6 +46,16 @@ WPM_MIN, WPM_MAX = 4, 60     # KS コマンドの範囲
 PWR_MIN, PWR_MAX = 5, 100    # PC コマンドの範囲（W）
 PWR_PRESETS = (5, 10, 20, 50, 100)
 RELAY_MS = 20                # 中継用の仮想 COM を見に行く間隔
+# 電源（CAT の PS コマンド）。電源を入れるときは、ダミーの文字で起こしてから 1～2 秒の間に PS1; を送る決まり。
+CMD_POWER_ON = "PS1;"
+CMD_POWER_OFF = "PS0;"
+POWER_WAKE_MS = 1300         # ダミーを送ってから PS1; を送るまで（1～2 秒の間）
+POWER_RETRY_MS = 1500        # 電源を入れた後、接続を試す間隔
+POWER_PROBE_S = 0.1          # 待っている間、ID; の返事を待つ時間（短くして画面が止まらないように）
+POWER_OFF_CHECK_MS = 700     # PS0; を送ってから、切れたか（ID; に答えなくなったか）確かめるまで
+POWER_OFF_TRIES = 3          # 切れていなければ、この回数まで PS0; を送り直す
+NO_ANSWER_LIMIT = 3          # 1 秒ごとの読み直しで、続けてこの回数返事が無ければ「電源が切れた」と考えて切断する
+POWER_WAIT_S = 15            # 電源を入れた後、この秒数つながらなければあきらめる
 
 # フィルター（CAT 説明書の SH・RF より）
 WIDTH_SSB = (300, 400, 600, 850, 1100, 1200, 1500, 1650, 1800, 1950, 2100, 2250,
@@ -73,6 +83,36 @@ MODES = {"1": "LSB", "2": "USB", "3": "CW-U", "4": "FM", "5": "AM", "6": "RTTY-L
 TEXTS = {
     "app_name": ("CW最小限 FTDX10", "CW Simple FTDX10"),
     "lang_btn": ("English", "日本語"),
+    "power_on": ("電源を入れる", "Power ON"),
+    "power_off": ("電源を切る", "Power OFF"),
+    "power_busy": ("電源を入れ中…", "Powering on..."),
+    "q_close_power_off": ("無線機の電源も切りますか？\n\n"
+                          "はい: 電源を切ってから閉じます\nいいえ: 電源は入れたまま閉じます\nキャンセル: 閉じません",
+                          "Turn the radio off too?\n\n"
+                          "Yes: turn it off, then close\nNo: close and leave it on\nCancel: do not close"),
+    "e_close_power_off": ("無線機の電源を切れなかったので、閉じるのをやめました。\n\n{msg}",
+                          "The radio could not be turned off, so the program was not closed.\n\n{msg}"),
+    "q_power_off": ("無線機の電源を切りますか？", "Turn the radio off?"),
+    "power_off_busy": ("電源を切り中…", "Powering off..."),
+    "m_powering_off": ("無線機の電源を切っています…", "Turning the radio off..."),
+    "m_power_off_fail": ("電源を切る命令を {n} 回送りましたが、無線機が切れませんでした。もう一度押すか、無線機の電源スイッチで切ってください。",
+                         "The power-off command was sent {n} times, but the radio stayed on. Press again, or use the radio's power switch."),
+    "m_no_answer": ("無線機の返事がなくなったので切断しました（無線機の電源が切れたようです）。",
+                    "The radio stopped answering, so it was disconnected (it seems to be turned off)."),
+    "m_already_off": ("無線機の電源は、すでに切れています（返事がありません）。",
+                      "The radio is already off (no answer)."),
+    "m_already_on": ("無線機の電源はすでに入っていたので、そのまま接続しました。",
+                     "The radio was already on, so it was connected."),
+    "m_power_off": ("無線機の電源を切りました。", "The radio was turned off."),
+    "m_powering_on": ("{port} から無線機の電源を入れています…", "Turning the radio on via {port}..."),
+    "m_power_wait": ("無線機が立ち上がるのを待っています…（{n} 秒）", "Waiting for the radio to start... ({n} s)"),
+    "m_power_on_fail": ("電源を入れる命令を送りましたが、無線機の返事がありません。\n"
+                        "無線機の電源が切れていると USB の COM ポートが使えない場合や、速さ（bps）が無線機の CAT RATE と違う場合があります。"
+                        "無線機の電源スイッチで入れてから「接続」を押してください。",
+                        "The power-on command was sent, but the radio did not answer.\n"
+                        "The USB COM port may not work while the radio is off, or the speed (bps) may not match the radio's CAT RATE. "
+                        "Turn the radio on with its power switch, then press \"Connect\"."),
+    "m_port_open_fail": ("{port} を開けませんでした: {e}", "Could not open {port}: {e}"),
     "f_conn": ("接続（USB）", "Connection (USB)"),
     "com_port": ("COM ポート", "COM port"),
     "refresh": ("更新", "Refresh"),
@@ -277,14 +317,14 @@ class Radio:
         self.ser = port_obj
 
     @classmethod
-    def open(cls, port, baud):
+    def open(cls, port, baud, timeout=0.3):
         s = serial.Serial()
         s.port = port
         s.baudrate = baud
         s.bytesize = 8
         s.parity = "N"
         s.stopbits = 2  # FTDX10 の CAT は 8N2（1 でも多くの場合動く）
-        s.timeout = 0.3
+        s.timeout = timeout
         s.write_timeout = 1
         s.rtscts = False
         s.dsrdtr = False
@@ -426,6 +466,22 @@ def find_radio(port, first_baud):
     return None, None, last_err
 
 
+def probe_radio(port, baud):
+    """選んだ速さ 1 つだけで、短く（POWER_PROBE_S 秒）ID; の返事を確かめる。電源を入れた後の待ち用。
+    find_radio は 4 つの速さを順に試すので、返事が無いと約 1.2 秒画面が止まる。こちらは約 0.1 秒。
+    PS1; はこの速さで送っているので、電源が入ったならこの速さで返事が来る。"""
+    try:
+        r = Radio.open(port, baud, timeout=POWER_PROBE_S)
+    except Exception:
+        return False
+    try:
+        return r.identify().startswith("ID")
+    except Exception:
+        return False
+    finally:
+        r.close()
+
+
 # ---------------------------------------------------------------- 画面
 
 class Knob(tk.Canvas):
@@ -508,8 +564,20 @@ class Knob(tk.Canvas):
             self.on_step(steps)
 
 
+def disable_ime():
+    """このソフトでは日本語入力（IME）を使わないようにする。文字を打つ欄が無いので要らない。
+    起動のたびに、左上の電源ボタンの上に日本語入力のバー（「日本語入力オフ」）が 1～2 秒出るのを防ぐ（ユーザー報告）。
+    ウィンドウを作る前に呼ぶ。Windows 以外や失敗したときは何もしない。"""
+    try:
+        import ctypes
+        ctypes.windll.imm32.ImmDisableIME(0xFFFFFFFF)  # このソフトのすべてのスレッド
+    except Exception:
+        pass
+
+
 class App(tk.Tk):
     def __init__(self):
+        disable_ime()
         super().__init__()
         self.resizable(False, False)
         # ウィンドウの左上とタスクバーのアイコン（exe なら exe に入れたアイコン、そうでなければ icon.ico）
@@ -532,11 +600,22 @@ class App(tk.Tk):
         # いちばん上: 名前と、言語の切り替えボタン
         top = ttk.Frame(self)
         top.grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(6, 0))
-        top.columnconfigure(0, weight=1)
+        top.columnconfigure(1, weight=1)
+        # 左上隅: 無線機の電源ボタン（つないでいないときは「入れる」、つないでいるときは「切る」）
+        # キーヤーの ON/OFF と同じ色にする（電源が入っていれば緑、切れていれば灰色）ので、色を変えられる tk.Button
+        self.power_btn = tk.Button(top, width=13, font=("Yu Gothic UI", 10, "bold"), command=self.power_pressed)
+        self.power_btn.grid(row=0, column=0, sticky="w", padx=(0, 10))
+        self.power_busy = False  # 電源を入れている最中
+        self.radio_on = False    # 最後に分かっていた無線機の電源の状態（接続とは別。ボタンの表示に使う）
+        self.off_radio, self.off_temp = None, False  # 電源を切っている最中に使うポート
+        self.powering_off = False  # 電源を切っている最中
+        self.power_off_sent = 0    # そのとき PS0; を送った回数
+        self.no_answer = 0       # 読み直しで、続けて返事が無かった回数
         self.name_lbl = self.tw(ttk.Label(top, font=("Yu Gothic UI", 16, "bold")), "app_name")
-        self.name_lbl.grid(row=0, column=0, sticky="w")
+        self.name_lbl.grid(row=0, column=1, sticky="w")
+        self.closing = False     # 閉じるために電源を切っている最中
         self.lang_btn = self.tw(ttk.Button(top, width=10, command=self.toggle_lang), "lang_btn")
-        self.lang_btn.grid(row=0, column=1, sticky="e")
+        self.lang_btn.grid(row=0, column=2, sticky="e")
 
         # 接続
         f1 = self.tw(ttk.LabelFrame(self), "f_conn")
@@ -629,6 +708,11 @@ class App(tk.Tk):
         self.tune_target = None
         self.tune_job = None
         self.last_tune = 0.0
+        # 今の「1目盛り」を選んだときの周波数（このソフトが最後に知っている、自分で合わせた周波数）。
+        # つまみを回し始めるとき、無線機の周波数がこれと違っていたら（本体のダイヤルやログソフトで変えた）、
+        # その時の周波数で「1目盛り」を選び直す（v2.2.0。接続時に選んだ目盛りが合わなくなる不具合の報告から）。
+        # 「1目盛り」のボタンを自分で押したら、次に外で周波数が変わるまではそのまま。
+        self.step_freq = None
 
         # CW・送信パワー（左下）。キーヤーの横に CW スピード、ブレークインの横に RF パワー。
         f4 = self.tw(ttk.LabelFrame(self), "f_cw")
@@ -746,6 +830,7 @@ class App(tk.Tk):
         for widget, key in self.i18n:
             widget.config(text=self.t(key))
         self.conn_btn.config(text=self.t("disconnect" if self.radio else "connect"))
+        self.update_power_btn()
         self.set_relay_state(*self.relay_state)
         self.update_wpm_label()
         self.update_pwr_label()
@@ -814,6 +899,178 @@ class App(tk.Tk):
         for b in self.pwr_btns:
             b.config(state=st)
         self.conn_btn.config(text=self.t("disconnect" if ok else "connect"))
+        self.update_power_btn()
+
+    # ---------------- 電源（CAT の PS コマンド）
+    # ボタンの表示は「つながっているか」ではなく、最後に分かっていた電源の状態（radio_on）で決める。
+    # 切断しただけなら電源は入ったままなので「電源を切る」のまま。切断中は無線機を見ていられないので、
+    # 表示は実際と食い違うことがある（切断中に本体のスイッチで切ったなど）。そこで、押した瞬間に ID; で
+    # 本当の状態を確かめてから動く（切断中は、その間だけポートを開く）。
+    def update_power_btn(self):
+        if self.powering_off:
+            self.power_btn.config(text=self.t("power_off_busy"), state="disabled", bg="#d0d0d0", fg="black")
+        elif self.power_busy:
+            self.power_btn.config(text=self.t("power_busy"), state="disabled", bg="#d0d0d0", fg="black")
+        elif self.radio_on:  # 電源が入っている: 緑（キーヤーの ON と同じ色）
+            self.power_btn.config(text=self.t("power_off"), state="normal", bg="#2e7d32", fg="white",
+                                  activebackground="#1b5e20", activeforeground="white")
+        else:                # 切れている: 灰色（キーヤーの OFF と同じ色）
+            self.power_btn.config(text=self.t("power_on"), state="normal", bg="#d0d0d0", fg="black",
+                                  activebackground="#bdbdbd", activeforeground="black")
+
+    def set_radio_on(self, on):
+        self.radio_on = bool(on)
+        self.update_power_btn()
+
+    def power_pressed(self):
+        if self.power_busy or self.powering_off:
+            return
+        if self.radio:  # つながっている = 電源は入っている
+            self.power_off(self.radio, temp=False)
+            return
+        # 切断中: ポートを開いて、本当に電源が入っているか確かめる
+        port = self.port_var.get().split(" ")[0]
+        if not port:
+            messagebox.showwarning(self.t("app_name"), self.t("e_noport"))
+            return
+        r = None
+        try:
+            r = Radio.open(port, int(self.baud_var.get()))
+            alive = r.identify().startswith("ID")
+        except Exception as e:
+            if r:
+                r.close()
+            self.say("m_port_open_fail", port=port, e=e)
+            messagebox.showerror(self.t("app_name"), self.t("m_port_open_fail", port=port, e=e))
+            return
+        if self.radio_on:          # 表示は「電源を切る」
+            if alive:
+                self.power_off(r, temp=True)
+            else:
+                r.close()
+                self.set_radio_on(False)
+                self.say("m_already_off")
+        else:                      # 表示は「電源を入れる」
+            if alive:
+                # すでに入っていたら、そのまま接続する（ユーザーの希望。起動のたびに「接続」も押す手間をなくす）
+                r.close()
+                self.set_radio_on(True)
+                if self.connect():
+                    self.say("m_already_on")
+            else:
+                self.power_on(r, port)
+
+    def power_off(self, r, temp, confirm=True):
+        """r に PS0; を送って電源を切る。temp は、このためだけに開いたポート（切断中）かどうか。"""
+        # 押しまちがいで切れないように、確かめてから（閉じるときは、もう聞いてあるので聞かない）
+        if confirm and not messagebox.askyesno(self.t("app_name"), self.t("q_power_off")):
+            if temp:
+                r.close()
+            return
+        # 1 回送っただけでは切れないことがあった（ユーザー報告）ので、切れたか確かめ、切れていなければ送り直す
+        self.off_radio, self.off_temp = r, temp
+        self.powering_off = True
+        self.power_off_sent = 0
+        self.update_power_btn()
+        self.conn_btn.config(state="disabled")
+        self.say("m_powering_off")
+        self.power_off_send()
+
+    def power_off_send(self):
+        try:
+            self.off_radio.send(CMD_POWER_OFF)
+        except Exception as e:
+            self.power_off_end("m_lost", e=e)
+            return
+        self.power_off_sent += 1
+        self.after(POWER_OFF_CHECK_MS, self.power_off_check)
+
+    def power_off_check(self):
+        """PS0; を送って少し待った後。ID; に答えなくなっていれば切れた。まだ答えるなら送り直す。"""
+        if not self.off_temp and not self.radio:  # 待っている間に通信が切れた
+            self.power_off_end(None)
+            return
+        try:
+            alive = self.off_radio.identify().startswith("ID")
+        except Exception as e:
+            self.power_off_end("m_lost", e=e)
+            return
+        if not alive:
+            self.radio_on = False
+            self.power_off_end("m_power_off")
+        elif self.power_off_sent >= POWER_OFF_TRIES:
+            self.power_off_end("m_power_off_fail", keep=True, n=self.power_off_sent)
+        else:
+            self.power_off_send()
+
+    def power_off_end(self, key, keep=False, **kw):
+        """電源を切る流れの終わり。keep でなければ、つながっていたら切断する。key は一番下に出すお知らせ。"""
+        self.powering_off = False
+        self.conn_btn.config(state="normal")
+        if self.off_temp:
+            self.off_radio.close()
+        self.off_radio = None
+        if self.radio and not keep and key:
+            self.disconnect(key, **kw)  # ボタンの表示もここで直る
+        else:
+            self.update_power_btn()
+            if key:
+                self.say(key, **kw)
+        if self.closing:  # 閉じるために切っていた
+            self.closing = False
+            if not self.radio_on:
+                self.finish_close()
+            else:  # 切れなかった。閉じずに知らせる
+                messagebox.showwarning(self.t("app_name"), self.t("e_close_power_off", msg=self.msg_var.get()))
+
+    def power_on(self, r, port):
+        """電源を入れる。r は開いてあるポート（ID; に答えなかった = 電源が切れている）。
+        寝ている無線機はダミーの文字で起こしてから、1～2 秒の間に PS1; を送る決まり。
+        電源が切れていると ID に答えないので「接続」は通らない。ポートに直接送り、立ち上がったら自動で接続する。"""
+        self.power_busy = True
+        self.update_power_btn()
+        self.conn_btn.config(state="disabled")
+        self.say("m_powering_on", port=port)
+        try:
+            r.send(CMD_POWER_ON)  # 1 回目は無線機を起こすためのダミー
+        except Exception as e:
+            r.close()
+            self.power_done()
+            self.say("m_port_open_fail", port=port, e=e)
+            return
+        self.after(POWER_WAKE_MS, lambda: self.power_on_send(r, port))
+
+    def power_on_send(self, r, port):
+        try:
+            r.send(CMD_POWER_ON)  # 2 回目が本当の「電源を入れる」
+        except Exception as e:
+            r.close()
+            self.power_done()
+            self.say("m_port_open_fail", port=port, e=e)
+            return
+        r.close()  # 立ち上がったら、いつもの「接続」で速さを探してつなぐ
+        self.power_start = time.monotonic()
+        self.after(POWER_RETRY_MS, self.power_try_connect)
+
+    def power_try_connect(self):
+        waited = time.monotonic() - self.power_start
+        self.say("m_power_wait", n=int(waited))
+        port = self.port_var.get().split(" ")[0]
+        # 返事が来る（立ち上がった）までは軽く確かめるだけ。来たら、いつもの接続をする
+        if probe_radio(port, int(self.baud_var.get())) and self.connect(quiet=True):
+            self.power_done()
+            return
+        if waited > POWER_WAIT_S:
+            self.power_done()
+            self.say("m_power_on_fail")
+            messagebox.showerror(self.t("app_name"), self.t("m_power_on_fail"))
+            return
+        self.after(POWER_RETRY_MS, self.power_try_connect)
+
+    def power_done(self):
+        self.power_busy = False
+        self.conn_btn.config(state="normal")
+        self.update_power_btn()
 
     # ---------------- CW・送信パワー
     def make_scale(self, parent, var, lo, hi, step, code, on_move):
@@ -882,6 +1139,7 @@ class App(tk.Tk):
         step = self.tune_step_var.get()
         base = self.tune_target if self.tune_target is not None else self.last_st["freq"]
         new = round_to_step(base, step)
+        self.step_freq = new  # 自分で選んだ目盛りを優先する（外で周波数が変わるまで選び直さない）
         if new == base:
             return
         self.tune_target = new
@@ -1056,31 +1314,41 @@ class App(tk.Tk):
         if self.radio:
             self.disconnect("m_disconnected")
             return
+        self.connect()
+
+    def connect(self, quiet=False):
+        """無線機を探してつなぐ。quiet なら、つながらなくてもお知らせや窓を出さない（電源を入れた後の待ち用）。"""
         port = self.port_var.get().split(" ")[0]
         if not port:
-            messagebox.showwarning(self.t("app_name"), self.t("e_noport"))
-            return
-        self.say("m_connecting", port=port)
-        self.update()
+            if not quiet:
+                messagebox.showwarning(self.t("app_name"), self.t("e_noport"))
+            return False
+        if not quiet:
+            self.say("m_connecting", port=port)
+            self.update()
         r, baud, info = find_radio(port, int(self.baud_var.get()))
         if not r:
-            self.say("m_conn_fail")
-            messagebox.showerror(self.t("app_name"), self.t("e_conn_fail", port=port, info=info))
-            return
+            if not quiet:
+                self.say("m_conn_fail")
+                messagebox.showerror(self.t("app_name"), self.t("e_conn_fail", port=port, info=info))
+            return False
         self.radio = r
         self.baud_var.set(str(baud))
         note = "" if info == "ID0761;" else self.t("note_not_ftdx10", info=info)
         self.say("m_connected", port=port, baud=baud, note=note)
         self.save_settings()
+        self.radio_on = True
         self.set_connected(True)
         self.poll()
         # 今の周波数の一番下の 0 でない桁に合わせて「1目盛り」を選ぶ（例: 7.008.715 → 1 Hz、7.008.700 → 100 Hz）
         if self.last_st:
             self.tune_step_var.set(step_for_freq(self.last_st["freq"]))
+            self.step_freq = self.last_st["freq"]
         # 起動して接続したら、すぐにスライダーの量で送信をずらす（TX CLAR ON）
         self.apply()
         if self.relay_on_var.get():
             self.start_relay()
+        return True
 
     def disconnect(self, key, **kw):
         self.stop_relay()
@@ -1091,6 +1359,7 @@ class App(tk.Tk):
                 self.after_cancel(job)
         self.poll_job = self.tune_job = None
         self.tune_target = None
+        self.no_answer = 0
         self.last_tune = 0.0  # つないだ直後に、すぐ周波数を読めるように
         if self.radio:
             self.radio.close()
@@ -1214,6 +1483,9 @@ class App(tk.Tk):
         if not self.radio or not self.last_st:
             return
         base = self.tune_target if self.tune_target is not None else self.last_st["freq"]
+        if self.tune_target is None and base != self.step_freq:
+            # 回し始めたとき、外（本体のダイヤル・ログソフト）で周波数が変わっていたら、今の周波数に合う目盛りにする
+            self.tune_step_var.set(step_for_freq(base))
         self.tune_target = max(FREQ_MIN, min(FREQ_MAX, base + steps * self.tune_step_var.get()))
         self.last_tune = time.monotonic()
         self.show_status(dict(self.last_st, freq=self.tune_target), keep=True)
@@ -1232,6 +1504,7 @@ class App(tk.Tk):
         except Exception as e:
             self.disconnect("m_lost", e=e)
             return
+        self.step_freq = self.tune_target
         self.last_tune = self.last_freq_change = time.monotonic()
 
     def knob_released(self):
@@ -1244,7 +1517,8 @@ class App(tk.Tk):
         self.poll_job = None
         if not self.radio:
             return
-        if not self.tuning_now():  # 回している間は、表示が古い値に戻らないよう読まない
+        # 回している間は、表示が古い値に戻らないよう読まない。電源を切っている最中も読まない
+        if not self.tuning_now() and not self.powering_off:
             try:
                 st = self.radio.status()
             except Exception as e:
@@ -1252,6 +1526,18 @@ class App(tk.Tk):
                 return
             self.tune_target = None
             self.show_status(st)
+            if not st:
+                # 返事が無い。COM ポートは無線機の電源が切れていても開いたままなので、エラーにはならない。
+                # 続けて返事が無ければ、本体で電源を切ったと考えて切断する（v2.2.0。ボタンが「電源を切る」「切断」の
+                # ままだったユーザー報告）。ほかの読み出しは、待ち時間で画面が止まるのでしない。
+                self.no_answer += 1
+                if self.no_answer >= NO_ANSWER_LIMIT:
+                    self.radio_on = False
+                    self.disconnect("m_no_answer")
+                    return
+                self.poll_job = self.after(POLL_MS, self.poll)
+                return
+            self.no_answer = 0
             self.sync_tx_shift(st)
             if not self.radio:
                 return
@@ -1284,7 +1570,44 @@ class App(tk.Tk):
                                          tx="ON" if st["tx_clar"] else "OFF"))
 
     def on_close(self):
+        """×で閉じるとき。無線機の電源が入っていたら「電源も切りますか？」と聞く。
+        はい → 切れたのを確かめてから閉じる／いいえ → そのまま閉じる／キャンセル → 閉じない。"""
+        if self.powering_off:  # 電源を切っている最中（1～2 秒）は待ってもらう
+            return
+        if not self.radio_on or self.power_busy:
+            self.finish_close()
+            return
+        r, temp = self.radio, False
+        if not r:
+            # 切断中: 本当に電源が入っているか確かめる。開けない（ほかのソフトが使っている）・返事が無いなら、聞かずに閉じる
+            port = self.port_var.get().split(" ")[0]
+            try:
+                r = Radio.open(port, int(self.baud_var.get()))
+                temp = True
+                alive = r.identify().startswith("ID")
+            except Exception:
+                alive = False
+            if not alive:
+                if temp:
+                    r.close()
+                self.finish_close()
+                return
+        ans = messagebox.askyesnocancel(self.t("app_name"), self.t("q_close_power_off"))
+        if not ans:
+            if temp:
+                r.close()
+            if ans is False:  # いいえ: 電源は入れたまま閉じる
+                self.finish_close()
+            return            # キャンセル: 閉じない
+        self.closing = True
+        self.power_off(r, temp, confirm=False)
+
+    def finish_close(self):
         self.save_settings()
+        for job in (self.poll_job, self.tune_job):  # 閉じた後に動かないように、予約を取り消す
+            if job:
+                self.after_cancel(job)
+        self.poll_job = self.tune_job = None
         self.stop_relay()
         if self.radio:
             self.radio.close()
@@ -1302,6 +1625,8 @@ class FakeFTDX10:
         self.width, self.roof = 13, "2"
         self.mode = "2"
         self.fa_clears_clar = False
+        self.power, self.woke = True, False
+        self.ignore_ps0 = 0
         self.out = b""
         self.log = []
 
@@ -1319,7 +1644,19 @@ class FakeFTDX10:
             if not c:
                 continue
             self.log.append(c + ";")
-            if c == "ID":
+            if not self.power:  # 電源が切れている間は答えない。何か来たら起き、起きた後の PS1 で電源が入る
+                if c == "PS1" and self.woke:
+                    self.power = True
+                self.woke = True
+                continue
+            if c == "PS0":
+                if self.ignore_ps0 > 0:  # 電源を切る命令を聞きのがすまね
+                    self.ignore_ps0 -= 1
+                else:
+                    self.power, self.woke = False, False
+            elif c == "PS":
+                self.out += b"PS1;"
+            elif c == "ID":
                 self.out += b"ID0761;"
             elif c == "IF":
                 self.out += (f"IF001{self.freq:09d}{'-' if self.offset < 0 else '+'}"
@@ -1436,6 +1773,14 @@ def selftest():
     assert snap(500, 100, 1000) == 500 and snap(5.0, 10, 100) in (0, 10) and snap("x", 10, 100) == 50
     assert [step_for_freq(f) for f in (7008715, 7008710, 7008700, 7008000, 14000000)] == [1, 10, 100, 1000, 1000]
     assert round_to_step(7008715, 1) == 7008715
+    # 電源: 切ると答えなくなり、ダミーの後の PS1; で入る
+    r.send(CMD_POWER_OFF)
+    assert r.identify() == "" and not fake.power
+    fake.woke = False     # 上の ID; で起きた分を戻す（本物は起きていられる時間が短い）
+    r.send(CMD_POWER_ON)  # ダミー（起こすだけ）
+    assert not fake.power
+    r.send(CMD_POWER_ON)
+    assert fake.power and r.identify() == "ID0761;"
     # 日本語と英語で、{ } の名前がそろっているか
     import string
     for key, pair in TEXTS.items():
