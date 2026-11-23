@@ -28,7 +28,7 @@ try:
 except ImportError:  # selftest だけなら無くても動くようにする
     serial = None
 
-VERSION = "2.2.0"
+VERSION = "2.2.1"
 BAUDS = [38400, 19200, 9600, 4800]
 MAX_OFFSET = 9990  # FTDX10 のクラリファイアは ±9.99 kHz
 POLL_MS = 1000
